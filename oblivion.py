@@ -724,8 +724,6 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hidden</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased}
 
@@ -741,8 +739,8 @@ HTML = r"""<!DOCTYPE html>
   --blue:      #ffffff;
   --red:       #ffffff;
   --yellow:    #ffffff;
-  --mono:      'Space Mono', monospace;
-  --sans:      'DM Sans', sans-serif;
+  --mono:      Arial, sans-serif;
+  --sans:      Arial, sans-serif;
 }
 
 html,body{
@@ -754,23 +752,6 @@ html,body{
   overflow:hidden;
   user-select:none;
   font-size:14px;
-}
-
-#blackhole-container {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 340px;
-  height: 340px;
-  pointer-events: none;
-  z-index: 0;
-}
-
-#blackhole-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
 }
 
 #titlebar,
@@ -795,13 +776,6 @@ html,body{
 #titlebar .brand{
   display:flex;align-items:center;gap:10px;
   -webkit-app-region:no-drag;
-}
-#titlebar .logo{
-  width:24px; height:24px;
-  background: #000;
-  border-radius: 50%;
-  border: 2px solid #fff;
-  box-shadow: 0 0 8px rgba(255,255,255,0.4);
 }
 #titlebar .name{
   font-family:var(--mono);
@@ -957,14 +931,9 @@ html,body{
 </head>
 <body>
 
-<div id="blackhole-container">
-  <canvas id="blackhole-canvas"></canvas>
-</div>
-
 <div id="titlebar">
   <div class="brand">
-    <div class="logo"></div>
-    <div class="name">OBLI<span>VION</span></div>
+    <div class="name">Hidden</div>
   </div>
   <div class="controls">
     <button class="wbtn clear-btn" id="clearBtn">Clear</button>
@@ -1023,157 +992,6 @@ html,body{
 
 <script>
 'use strict';
-
-const canvas = document.getElementById('blackhole-canvas');
-const container = document.getElementById('blackhole-container');
-const ctx = canvas.getContext('2d');
-
-function resizeCanvas() {
-  const rect = container.getBoundingClientRect();
-  canvas.width = rect.width * window.devicePixelRatio;
-  canvas.height = rect.height * window.devicePixelRatio;
-  canvas.style.width = rect.width + 'px';
-  canvas.style.height = rect.height + 'px';
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-}
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
-
-let orbitAngle = 0;
-
-const numParticles = 120;
-const particles = [];
-for (let i = 0; i < numParticles; i++) {
-  const type = Math.random() < 0.7 ? 'disk' : 'ring';
-  let radiusBase;
-  if (type === 'disk') {
-    radiusBase = 0.45 + Math.random() * 0.45;
-  } else {
-    radiusBase = 1.02 + Math.random() * 0.08;
-  }
-  const angleOffset = Math.random() * 2 * Math.PI;
-  const speed = 0.0018 + Math.random() * 0.0022;
-  const size = 0.6 + Math.random() * 1.6;
-  const opacity = 0.4 + Math.random() * 0.6;
-  particles.push({
-    type,
-    radiusBase,
-    angleOffset,
-    speed,
-    size,
-    opacity,
-    phase: Math.random() * 100
-  });
-}
-
-function drawParticles(time) {
-  const w = canvas.width / window.devicePixelRatio;
-  const h = canvas.height / window.devicePixelRatio;
-  const cx = w/2, cy = h/2;
-  const R = Math.min(w, h) * 0.40;
-  const tilt = 20 * Math.PI / 180;
-  const flatten = 0.38;
-  const offsetY = R * 0.08;
-
-  for (const p of particles) {
-    let angle = p.angleOffset + time * p.speed * 0.001;
-    if (p.type === 'ring') {
-      angle += 0.3 * Math.sin(time * 0.0015 + p.phase);
-    }
-    const radius = R * p.radiusBase;
-
-    const x0 = radius * Math.cos(angle);
-    const y0 = radius * Math.sin(angle);
-
-    const cosT = Math.cos(tilt);
-    const sinT = Math.sin(tilt);
-    let px = x0 * cosT - y0 * sinT;
-    let py = (x0 * sinT + y0 * cosT) * flatten;
-
-    if (p.type === 'ring') {
-      py -= offsetY;
-    }
-
-    px += cx;
-    py += cy;
-
-    const size = p.size * (0.8 + 0.2 * Math.sin(time * 0.002 + p.phase));
-    const alpha = p.opacity * (0.8 + 0.2 * Math.sin(time * 0.0015 + p.phase * 1.2));
-
-    ctx.beginPath();
-    ctx.arc(px, py, size, 0, Math.PI*2);
-    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
-    ctx.fill();
-  }
-}
-
-function drawBlackHole(time) {
-  const w = canvas.width / window.devicePixelRatio;
-  const h = canvas.height / window.devicePixelRatio;
-  const cx = w/2, cy = h/2;
-  const R = Math.min(w, h) * 0.40;
-
-  ctx.clearRect(0, 0, w, h);
-
-  const offsetY = R * 0.08;
-  const shadowCenterX = cx;
-  const shadowCenterY = cy - offsetY;
-  const shadowR = R * 0.40;
-  ctx.beginPath();
-  ctx.arc(shadowCenterX, shadowCenterY, shadowR, 0, Math.PI*2);
-  ctx.fillStyle = 'rgba(0,0,0,1)';
-  ctx.fill();
-
-  const ringR = shadowR * 1.0;
-  ctx.shadowColor = 'rgba(255,255,255,0.6)';
-  ctx.shadowBlur = 25;
-  ctx.beginPath();
-  ctx.arc(shadowCenterX, shadowCenterY, ringR, 0, Math.PI*2);
-  ctx.strokeStyle = 'rgba(255,255,255,1)';
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-
-  const outerRingR = shadowR * 1.12;
-  ctx.beginPath();
-  ctx.arc(shadowCenterX, shadowCenterY, outerRingR, 0, Math.PI*2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  ctx.save();
-  ctx.shadowBlur = 0;
-  const lensOff = 4;
-  ctx.beginPath();
-  ctx.arc(cx + lensOff, cy, ringR * 1.08, 0, Math.PI*2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cx - lensOff, cy, ringR * 1.08, 0, Math.PI*2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.restore();
-
-  const coronaGrad = ctx.createRadialGradient(cx, cy, ringR*0.9, cx, cy, ringR*1.8);
-  coronaGrad.addColorStop(0, 'rgba(255,255,255,0)');
-  coronaGrad.addColorStop(0.5, 'rgba(255,255,255,0.04)');
-  coronaGrad.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.beginPath();
-  ctx.arc(cx, cy, ringR*1.8, 0, Math.PI*2);
-  ctx.fillStyle = coronaGrad;
-  ctx.fill();
-
-  drawParticles(time);
-}
-
-function animate(time) {
-  orbitAngle += 0.01;
-  drawBlackHole(time);
-  requestAnimationFrame(animate);
-}
-animate(0);
 
 let monitorOn = true;
 
