@@ -30,6 +30,14 @@ FFLAG_PREFIXES = {
 _FLAG_PREFIXES = tuple(sorted(FFLAG_PREFIXES, key=len, reverse=True))
 _BOOL_TYPES = frozenset(("FFlag", "DFFlag"))
 _INT_TYPES = frozenset(("FInt", "DFInt", "FLog", "DFLog"))
+MAX_SAFE_FLAG_INT = 100_000
+_RESOURCE_FLAG_KEYWORDS = ("scheduler", "thread", "concurrency", "packet", "bandwidth", "preload", "network")
+
+def is_safe_flag_int(flag_name, value):
+    if not -0x80000000 <= value <= 0x7FFFFFFF or abs(value) > MAX_SAFE_FLAG_INT:
+        return False
+    lowered = flag_name.lower()
+    return not (any(keyword in lowered for keyword in _RESOURCE_FLAG_KEYWORDS) and abs(value) > 10_000)
 
 OFFSET_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fflags_cache.json")
 GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/master/Offsets.hpp"
@@ -208,6 +216,7 @@ class OffsetInjector:
         self.offset_manager = OffsetManager(log_cb)
         self.default_values = {}
         self.injected_flags_cache = {}
+        self._write_lock = threading.Lock()
     
     def attach_with_handle(self, pid, pm, base):
         try:
@@ -221,9 +230,12 @@ class OffsetInjector:
             return False
     
     def _write_memory(self, address, data):
+        if not self.h_process or not isinstance(address, int) or not 0x10000 <= address <= 0x7FFFFFFFFFFF:
+            return False
         buf = (ctypes.c_char * len(data))(*data)
         written = ctypes.c_size_t(0)
-        ok = self.k32.WriteProcessMemory(self.h_process, ctypes.c_void_p(address), buf, len(data), ctypes.byref(written))
+        with self._write_lock:
+            ok = self.k32.WriteProcessMemory(self.h_process, ctypes.c_void_p(address), buf, len(data), ctypes.byref(written))
         return bool(ok) and written.value == len(data)
     
     def set_flag(self, full_name, value):
@@ -245,35 +257,19 @@ class OffsetInjector:
                 return result
             elif flag_type in ("FInt", "DFInt", "FLog", "DFLog"):
                 int_val = int(value)
+                if not is_safe_flag_int(full_name, int_val):
+                    return False
                 result = self._write_memory(addr, int_val.to_bytes(4, 'little', signed=True))
                 if result:
                     self.injected_flags_cache[full_name] = int_val
                 return result
             elif flag_type in ("FString", "DFString"):
-                enc = val_s.encode('utf-8') + b'\x00'
-                result = self._write_memory(addr, enc)
-                if result:
-                    self.injected_flags_cache[full_name] = val_s
-                return result
+                # FStrings are heap-backed objects, not inline byte buffers.
+                # Writing raw bytes here can corrupt Roblox's allocator.
+                return False
             else:
-                if val_s.lower() in ("true", "false"):
-                    bool_val = 1 if val_s.lower() == "true" else 0
-                    result = self._write_memory(addr, bool_val.to_bytes(4, 'little', signed=True))
-                    if result:
-                        self.injected_flags_cache[full_name] = bool_val
-                    return result
-                elif val_s.lstrip('-').isdigit():
-                    int_val = int(val_s)
-                    result = self._write_memory(addr, int_val.to_bytes(4, 'little', signed=True))
-                    if result:
-                        self.injected_flags_cache[full_name] = int_val
-                    return result
-                else:
-                    enc = val_s.encode('utf-8') + b'\x00'
-                    result = self._write_memory(addr, enc)
-                    if result:
-                        self.injected_flags_cache[full_name] = val_s
-                    return result
+                # Unknown flag layouts are unsafe to infer from the value.
+                return False
         except Exception as e:
             self._log(f"- Write failed for {full_name}: {e}")
             return False
@@ -315,6 +311,8 @@ class OffsetInjector:
             elif flag_type in _INT_TYPES:
                 val = self.pm.read_int(addr)
                 return str(val)
+            elif flag_type in ("FString", "DFString"):
+                return None
             else:
                 return self.pm.read_string(addr, 64)
         except:
@@ -351,7 +349,7 @@ class FFlagMonitor:
         self.flag_states = {}
         self.monitoring = False
         self.monitor_thread = None
-        self.check_interval = 0.5
+        self.check_interval = 2.0
         self.total_reinjected = 0
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -367,6 +365,9 @@ class FFlagMonitor:
     def stop_monitoring(self):
         self.monitoring = False
         self._stop_event.set()
+        if self.monitor_thread and self.monitor_thread is not threading.current_thread():
+            self.monitor_thread.join(timeout=1.0)
+        self.monitor_thread = None
 
     def update_injected_flags(self, flags):
         with self._lock:
@@ -376,7 +377,8 @@ class FFlagMonitor:
                 self.flag_states[name] = {
                     'desired': flag["value"],
                     'last_reinject': time.time(),
-                    'injection_count': 1
+                    'injection_count': 1,
+                    'mismatch_count': 0
                 }
 
     def clear_injected_flags(self):
@@ -411,10 +413,26 @@ class FFlagMonitor:
             snapshot = [(name, state['desired']) for name, state in self.flag_states.items()]
 
         # Process reads can be slow; do not hold the state lock during I/O.
+        now = time.time()
         for name, desired in snapshot:
             try:
                 if not self.injector.verify_flag(name, desired):
-                    flags_to_reinject.append(name)
+                    with self._lock:
+                        state = self.flag_states.get(name)
+                        if state is None:
+                            continue
+                        state['mismatch_count'] += 1
+                        # Require two consecutive mismatches and avoid writing
+                        # the same address repeatedly if Roblox is still busy.
+                        if (state['mismatch_count'] >= 2 and
+                                now - state['last_reinject'] >= 5.0 and
+                                state['injection_count'] < 4):
+                            flags_to_reinject.append(name)
+                else:
+                    with self._lock:
+                        state = self.flag_states.get(name)
+                        if state is not None:
+                            state['mismatch_count'] = 0
             except Exception:
                 continue
         
@@ -433,6 +451,7 @@ class FFlagMonitor:
                         if current is not None:
                             current['last_reinject'] = time.time()
                             current['injection_count'] += 1
+                            current['mismatch_count'] = 0
                             self.total_reinjected += 1
             except Exception:
                 continue
@@ -486,7 +505,14 @@ class HybridInjector:
                 
                 for pid in lost_pids:
                     if pid in self.connected_processes:
-                        del self.connected_processes[pid]
+                        entry = self.connected_processes.pop(pid)
+                        if self.monitor and self.offset_injector and self.offset_injector.pid == pid:
+                            self.monitor.stop_monitoring()
+                            self.offset_injector.h_process = None
+                        try:
+                            entry['pm'].close_process()
+                        except Exception:
+                            pass
                         self._log(f"- Roblox process {pid} closed")
                     self._is_injecting = False
                 
@@ -511,6 +537,11 @@ class HybridInjector:
                                     self._log(f"- Reinjected {result['success']}/{result['success']+result['fail']} flags")
                                     _window.evaluate_js(f"window.setFlagCount({result['success']})")
                                 self._is_injecting = False
+                        else:
+                            try:
+                                pm.close_process()
+                            except Exception:
+                                pass
                     except Exception as e:
                         self._log(f"- Failed to attach to PID {pid}: {e}")
                         continue
