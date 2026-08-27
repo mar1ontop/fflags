@@ -33,6 +33,8 @@ _INT_TYPES = frozenset(("FInt", "DFInt", "FLog", "DFLog"))
 
 OFFSET_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fflags_cache.json")
 GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/master/Offsets.hpp"
+WEAO_VERSIONS_URL = "https://weao.xyz/api/versions/current"
+WEAO_USER_AGENT = "WEAO-3PService"
 CACHE_DURATION_HOURS = 24
 SAVED_FLAGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_flags.json")
 
@@ -106,6 +108,7 @@ class OffsetManager:
         self._log = log_cb or print
         self._http = requests.Session()
         self.offsets = {}
+        self.roblox_version = None
         self.last_update = None
         self.load_from_cache()
     
@@ -115,6 +118,7 @@ class OffsetManager:
                 with open(OFFSET_CACHE_FILE, 'r') as f:
                     data = json.load(f)
                     self.offsets = data.get('offsets', {})
+                    self.roblox_version = data.get('roblox_version')
                     self.last_update = datetime.fromisoformat(data.get('last_update', '2000-01-01'))
                     self._log(f"- Loaded {len(self.offsets)} offsets from cache")
                     return True
@@ -126,6 +130,7 @@ class OffsetManager:
         try:
             data = {
                 'offsets': self.offsets,
+                'roblox_version': self.roblox_version,
                 'last_update': datetime.now().isoformat()
             }
             with open(OFFSET_CACHE_FILE, 'w') as f:
@@ -149,6 +154,7 @@ class OffsetManager:
             
             r.raise_for_status()
             content = r.text
+            version_match = re.search(r'Roblox Version\s*-\s*(version-[A-Za-z0-9]+)', content)
             matches = re.findall(r'uintptr_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+);', content)
             
             if not matches:
@@ -156,6 +162,7 @@ class OffsetManager:
                 return False
             
             self.offsets = {name: int(offset, 16) for name, offset in matches}
+            self.roblox_version = version_match.group(1) if version_match else None
             self.save_to_cache()
             self._log(f"- Synced {len(self.offsets)} offsets")
             return True
@@ -169,6 +176,25 @@ class OffsetManager:
     
     def get_all_offsets(self):
         return self.offsets
+
+    def get_current_roblox_version(self):
+        r = self._http.get(WEAO_VERSIONS_URL, headers={'User-Agent': WEAO_USER_AGENT}, timeout=10)
+        r.raise_for_status()
+        version = r.json().get('Windows')
+        return version if isinstance(version, str) and version.startswith('version-') else None
+
+def get_process_roblox_version(process_handle):
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        size = ctypes.wintypes.DWORD(len(buf))
+        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+            process_handle, 0, buf, ctypes.byref(size))
+        if not ok:
+            return None
+        match = re.search(r'version-[a-fA-F0-9]{16}', buf.value)
+        return match.group(0) if match else None
+    except Exception:
+        return None
 
 
 class OffsetInjector:
@@ -436,6 +462,20 @@ class HybridInjector:
     def sync_offsets(self):
         return self.offset_manager.sync_from_github()
 
+    def _versions_match(self, pm, pid):
+        local = get_process_roblox_version(pm.process_handle)
+        expected = self.offset_manager.roblox_version
+        try:
+            current = self.offset_manager.get_current_roblox_version()
+        except Exception as e:
+            self._log(f"- Could not verify Roblox version: {e}")
+            return False
+        if not local or not expected or local != current or local != expected:
+            self._log(f"[!] Offset version mismatch (Roblox: {local or 'unknown'}, current: {current or 'unknown'}, offsets: {expected or 'unknown'}). Injection blocked.")
+            return False
+        self._log(f"- Roblox version verified: {local}")
+        return True
+
     def _monitor_roblox(self):
         last_pids = set()
         while True:
@@ -455,7 +495,7 @@ class HybridInjector:
                         self._log(f"- New Roblox process detected (PID: {pid})")
                         pm = pymem.Pymem(pid)
                         base = get_module_base(pid)
-                        if base:
+                        if base and self._versions_match(pm, pid):
                             self.connected_processes[pid] = {'pm': pm, 'base': base}
                             self.offset_injector = OffsetInjector(log_cb=self._log)
                             self.offset_injector.attach_with_handle(pid, pm, base)
