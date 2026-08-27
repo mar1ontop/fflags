@@ -683,7 +683,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Oblivion</title>
+<title>Hidden</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <style>
@@ -953,10 +953,10 @@ html,body{
 
   <div id="log-container">
     <div id="log">
-      <div class="log-line info"><span class="ts">00:00:00</span><span class="txt">Oblivion initialised — waiting for Roblox</span></div>
+      <div class="log-line info"><span class="ts">00:00:00</span><span class="txt">Hidden initialised — waiting for Roblox</span></div>
     </div>
     <div class="credit-bar">
-      <div class="credit-text">Made by syscall</div>
+      <div class="credit-text">Made by mar1ontop</div>
     </div>
   </div>
 
@@ -1158,7 +1158,7 @@ window.appendLog = function(msg){
 
 window.clearLog = function(){
   const log = document.getElementById('log');
-  log.innerHTML = '<div class="log-line info"><span class="ts">00:00:00</span><span class="txt">Oblivion initialised — waiting for Roblox</span></div>';
+  log.innerHTML = '<div class="log-line info"><span class="ts">00:00:00</span><span class="txt">Hidden initialised — waiting for Roblox</span></div>';
 };
 
 function escapeHtml(s){
@@ -1228,7 +1228,7 @@ def main():
     y = (screen_height - window_height) // 2
     
     _window = webview.create_window(
-        title='Oblivion',
+        title='Hidden',
         html=HTML,
         js_api=api,
         width=window_width,
