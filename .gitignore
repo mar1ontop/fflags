@@ -1,0 +1,8 @@
+build_*/
+dist/
+__pycache__/
+*.pyc
+*.exe
+*.spec
+fflags_cache.json
+saved_flags.json
