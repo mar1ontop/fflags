@@ -39,12 +39,13 @@ def is_safe_flag_int(flag_name, value):
     lowered = flag_name.lower()
     return not (any(keyword in lowered for keyword in _RESOURCE_FLAG_KEYWORDS) and abs(value) > 10_000)
 
-OFFSET_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fflags_cache.json")
+_APP_DATA_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+OFFSET_CACHE_FILE = os.path.join(_APP_DATA_DIR, "fflags_cache.json")
 GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/master/Offsets.hpp"
 WEAO_VERSIONS_URL = "https://weao.xyz/api/versions/current"
 WEAO_USER_AGENT = "WEAO-3PService"
 CACHE_DURATION_HOURS = 24
-SAVED_FLAGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_flags.json")
+SAVED_FLAGS_FILE = os.path.join(_APP_DATA_DIR, "saved_flags.json")
 
 def clean_flag_name(flag_name):
     for prefix in _FLAG_PREFIXES:
