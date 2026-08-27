@@ -766,6 +766,16 @@ html,body{
   z-index: 1;
 }
 
+#loading-overlay{
+  position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;
+  background:#000;color:#fff;font-family:Arial,sans-serif;font-size:14px;letter-spacing:.04em;
+  transition:opacity .25s ease;
+}
+#loading-overlay.hidden{opacity:0;pointer-events:none;}
+#loading-overlay .loader{display:flex;align-items:center;gap:10px;}
+#loading-overlay .spinner{width:14px;height:14px;border:2px solid #444;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 #titlebar{
   display:flex;align-items:center;justify-content:space-between;
   padding:0 16px;height:48px;
@@ -931,6 +941,8 @@ html,body{
 </head>
 <body>
 
+<div id="loading-overlay"><div class="loader"><span class="spinner"></span><span>Loading Hidden…</span></div></div>
+
 <div id="titlebar">
   <div class="brand">
     <div class="name">Hidden</div>
@@ -1030,6 +1042,7 @@ window.setFlagCount = function(n){
 function pollStatus(){
   if(!window.pywebview) return;
   window.pywebview.api.get_status().then(s => {
+    document.getElementById('loading-overlay').classList.add('hidden');
     document.getElementById('pill-attach').classList.toggle('on', s.attached);
     document.getElementById('pill-monitor').classList.toggle('on', s.monitoring);
     document.getElementById('stat-flags').textContent = s.flags;
@@ -1039,6 +1052,7 @@ function pollStatus(){
   }).catch(()=>{});
 }
 setInterval(pollStatus, 1500);
+pollStatus();
 
 function doLoad(){
   if(!window.pywebview) return;
@@ -1077,7 +1091,6 @@ document.getElementById('closeBtn').addEventListener('click', () => {
 
 def main():
     global _window
-    get_injector()
     api = Api()
     
     screen_width, screen_height = get_screen_center()
