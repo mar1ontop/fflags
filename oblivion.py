@@ -709,6 +709,23 @@ class Api:
         threading.Thread(target=worker, daemon=True).start()
         return {'ok': True}
 
+    def autoload_flags(self):
+        flags = list(get_injector().saved_flags)
+        if not flags:
+            return {'ok': False, 'message': 'No saved flags found'}
+
+        def worker():
+            res = get_injector().apply_flags(flags)
+            if res['success'] > 0:
+                push(f"- Auto-loaded {res['success']}/{res['success']+res['fail']} flags")
+                if _window:
+                    _window.evaluate_js(f"window.setFlagCount({res['success']})")
+            else:
+                push(f"- {res['message']}")
+
+        threading.Thread(target=worker, daemon=True).start()
+        return {'ok': True, 'message': f'Loading {len(flags)} saved flags'}
+
     def sync_offsets(self):
         def worker():
             push("- Syncing offsets from GitHub...")
@@ -770,8 +787,8 @@ HTML = r"""<!DOCTYPE html>
   --blue:      #ffffff;
   --red:       #ffffff;
   --yellow:    #ffffff;
-  --mono:      Arial, sans-serif;
-  --sans:      Arial, sans-serif;
+  --mono:      "Segoe UI", Arial, sans-serif;
+  --sans:      "Segoe UI", Arial, sans-serif;
 }
 
 html,body{
@@ -1017,6 +1034,10 @@ html,body{
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8M4 6l3 3 3-3M1 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Load Flags
     </button>
+    <button class="btn" onclick="doAutoLoad()">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2v5l3 2M12 7a5 5 0 1 1-1.46-3.54" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Auto Load
+    </button>
     <button class="btn" onclick="doSync()">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M11.5 7A4.5 4.5 0 1 1 7 2.5M11.5 2.5v4.5H7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Sync Offsets
@@ -1088,6 +1109,10 @@ pollStatus();
 function doLoad(){
   if(!window.pywebview) return;
   window.pywebview.api.load_flags();
+}
+function doAutoLoad(){
+  if(!window.pywebview) return;
+  window.pywebview.api.autoload_flags();
 }
 function doSync(){
   if(!window.pywebview) return;
