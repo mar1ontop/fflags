@@ -32,7 +32,7 @@ _BOOL_TYPES = frozenset(("FFlag", "DFFlag"))
 _INT_TYPES = frozenset(("FInt", "DFInt", "FLog", "DFLog"))
 
 OFFSET_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fflags_cache.json")
-GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/main/Offsets.hpp"
+GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/master/Offsets.hpp"
 CACHE_DURATION_HOURS = 24
 SAVED_FLAGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_flags.json")
 
