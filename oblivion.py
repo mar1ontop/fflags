@@ -710,21 +710,7 @@ class Api:
         return {'ok': True}
 
     def autoload_flags(self):
-        flags = list(get_injector().saved_flags)
-        if not flags:
-            return {'ok': False, 'message': 'No saved flags found'}
-
-        def worker():
-            res = get_injector().apply_flags(flags)
-            if res['success'] > 0:
-                push(f"- Auto-loaded {res['success']}/{res['success']+res['fail']} flags")
-                if _window:
-                    _window.evaluate_js(f"window.setFlagCount({res['success']})")
-            else:
-                push(f"- {res['message']}")
-
-        threading.Thread(target=worker, daemon=True).start()
-        return {'ok': True, 'message': f'Loading {len(flags)} saved flags'}
+        return self.load_flags()
 
     def sync_offsets(self):
         def worker():
