@@ -8,20 +8,10 @@ import os
 import requests
 import re
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pymem
 import pymem.process
 import webview
-
-ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
-
-class IO_STATUS_BLOCK(ctypes.Structure):
-    _fields_ = [('Status', ctypes.c_int), ('Information', ctypes.c_void_p)]
-
-NtWriteVirtualMemory = ntdll.NtWriteVirtualMemory
-NtWriteVirtualMemory.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(IO_STATUS_BLOCK)]
-NtWriteVirtualMemory.restype = ctypes.c_int
 
 FFLAG_PREFIXES = {
     "DFString": 8, "FString": 7, "DFInt": 5, "FInt": 4,
@@ -42,7 +32,11 @@ def is_safe_flag_int(flag_name, value):
 _APP_DATA_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 OFFSET_CACHE_FILE = os.path.join(_APP_DATA_DIR, "fflags_cache.json")
 GITHUB_OFFSETS_URL = "https://raw.githubusercontent.com/mar1ontop/fflags/master/Offsets.hpp"
-WEAO_VERSIONS_URL = "https://weao.xyz/api/versions/current"
+WEAO_VERSIONS_URLS = (
+    "https://weao.xyz/api/versions/current",
+    "https://whatexpsare.online/api/versions/current",
+    "https://weao.gg/api/versions/current",
+)
 WEAO_USER_AGENT = "WEAO-3PService"
 CACHE_DURATION_HOURS = 24
 SAVED_FLAGS_FILE = os.path.join(_APP_DATA_DIR, "saved_flags.json")
@@ -116,6 +110,8 @@ class OffsetManager:
     def __init__(self, log_cb=None):
         self._log = log_cb or print
         self._http = requests.Session()
+        self._http_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
         self.offsets = {}
         self.roblox_version = None
         self.last_update = None
@@ -126,7 +122,10 @@ class OffsetManager:
             if os.path.exists(OFFSET_CACHE_FILE):
                 with open(OFFSET_CACHE_FILE, 'r') as f:
                     data = json.load(f)
-                    self.offsets = data.get('offsets', {})
+                    offsets = data.get('offsets', {})
+                    if not isinstance(offsets, dict):
+                        return False
+                    self.offsets = offsets
                     self.roblox_version = data.get('roblox_version')
                     self.last_update = datetime.fromisoformat(data.get('last_update', '2000-01-01'))
                     self._log(f"- Loaded {len(self.offsets)} offsets from cache")
@@ -142,21 +141,25 @@ class OffsetManager:
                 'roblox_version': self.roblox_version,
                 'last_update': datetime.now().isoformat()
             }
-            with open(OFFSET_CACHE_FILE, 'w') as f:
-                json.dump(data, f)
+            with self._cache_lock:
+                temp_file = f"{OFFSET_CACHE_FILE}.tmp"
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f)
+                os.replace(temp_file, OFFSET_CACHE_FILE)
             self._log(f"- Saved {len(self.offsets)} offsets to cache")
         except Exception as e:
             self._log(f"- Failed to save cache: {e}")
     
     def is_cache_fresh(self):
-        if not self.last_update:
+        if not self.last_update or not self.offsets or not self.roblox_version:
             return False
         return datetime.now() - self.last_update < timedelta(hours=CACHE_DURATION_HOURS)
     
     def sync_from_github(self):
         self._log("- Syncing offsets from GitHub...")
         try:
-            r = self._http.get(GITHUB_OFFSETS_URL, timeout=10)
+            with self._http_lock:
+                r = self._http.get(GITHUB_OFFSETS_URL, timeout=(3, 10))
             if r.status_code != 200:
                 self._log(f"- GitHub returned {r.status_code}")
                 return False
@@ -166,8 +169,8 @@ class OffsetManager:
             version_match = re.search(r'Roblox Version\s*-\s*(version-[A-Za-z0-9]+)', content)
             matches = re.findall(r'uintptr_t\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+);', content)
             
-            if not matches:
-                self._log("- No offsets found in file")
+            if not matches or not version_match:
+                self._log("- Offset file is missing offsets or a Roblox version header")
                 return False
             
             self.offsets = {name: int(offset, 16) for name, offset in matches}
@@ -183,14 +186,24 @@ class OffsetManager:
         clean = clean_flag_name(flag_name)
         return self.offsets.get(clean)
     
-    def get_all_offsets(self):
-        return self.offsets
-
     def get_current_roblox_version(self):
-        r = self._http.get(WEAO_VERSIONS_URL, headers={'User-Agent': WEAO_USER_AGENT}, timeout=10)
-        r.raise_for_status()
-        version = r.json().get('Windows')
-        return version if isinstance(version, str) and version.startswith('version-') else None
+        last_error = None
+        for url in WEAO_VERSIONS_URLS:
+            try:
+                with self._http_lock:
+                    r = self._http.get(url, headers={'User-Agent': WEAO_USER_AGENT}, timeout=(3, 10))
+                r.raise_for_status()
+                version = r.json().get('Windows')
+                if isinstance(version, str) and version.startswith('version-'):
+                    return version
+            except (requests.RequestException, ValueError, TypeError, AttributeError) as error:
+                last_error = error
+        if last_error:
+            raise RuntimeError("No trusted Roblox version endpoint was available") from last_error
+        return None
+
+    def close(self):
+        self._http.close()
 
 def get_process_roblox_version(process_handle):
     try:
@@ -207,14 +220,14 @@ def get_process_roblox_version(process_handle):
 
 
 class OffsetInjector:
-    def __init__(self, log_cb=None):
+    def __init__(self, log_cb=None, offset_manager=None):
         self.k32 = ctypes.windll.kernel32
         self.pid = 0
         self.h_process = None
         self.pm = None
         self.base = 0
         self._log = log_cb or print
-        self.offset_manager = OffsetManager(log_cb)
+        self.offset_manager = offset_manager or OffsetManager(log_cb)
         self.default_values = {}
         self.injected_flags_cache = {}
         self._write_lock = threading.Lock()
@@ -353,22 +366,28 @@ class FFlagMonitor:
         self.check_interval = 2.0
         self.total_reinjected = 0
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._stop_event = threading.Event()
 
     def start_monitoring(self):
-        if self.monitoring:
-            return
-        self.monitoring = True
-        self._stop_event.clear()
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self.monitor_thread.start()
+        with self._lifecycle_lock:
+            if self.monitor_thread and self.monitor_thread.is_alive():
+                return
+            self.monitoring = True
+            self._stop_event.clear()
+            self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self.monitor_thread.start()
 
     def stop_monitoring(self):
-        self.monitoring = False
-        self._stop_event.set()
-        if self.monitor_thread and self.monitor_thread is not threading.current_thread():
-            self.monitor_thread.join(timeout=1.0)
-        self.monitor_thread = None
+        with self._lifecycle_lock:
+            self.monitoring = False
+            self._stop_event.set()
+            monitor_thread = self.monitor_thread
+        if monitor_thread and monitor_thread is not threading.current_thread():
+            monitor_thread.join(timeout=1.0)
+        with self._lifecycle_lock:
+            if self.monitor_thread is monitor_thread and (not monitor_thread or not monitor_thread.is_alive()):
+                self.monitor_thread = None
 
     def update_injected_flags(self, flags):
         with self._lock:
@@ -381,6 +400,7 @@ class FFlagMonitor:
                     'injection_count': 1,
                     'mismatch_count': 0
                 }
+            self.check_interval = min(10.0, max(2.0, 2.0 * ((len(self.flag_states) + 99) // 100)))
 
     def clear_injected_flags(self):
         with self._lock:
@@ -468,6 +488,11 @@ class HybridInjector:
         self.saved_flags = []
         self._waiting_message_shown = False
         self._is_injecting = False
+        self._state_lock = threading.RLock()
+        self._apply_lock = threading.RLock()
+        self._watcher_stop_event = threading.Event()
+        self._rescan_event = threading.Event()
+        self._version_retry_after = {}
         
         self.saved_flags = load_saved_flags()
         if self.saved_flags:
@@ -477,10 +502,16 @@ class HybridInjector:
         if not self.offset_manager.is_cache_fresh():
             self.offset_manager.sync_from_github()
         
-        threading.Thread(target=self._monitor_roblox, daemon=True).start()
+        self._watcher_thread = threading.Thread(target=self._monitor_roblox, daemon=True)
+        self._watcher_thread.start()
 
     def sync_offsets(self):
-        return self.offset_manager.sync_from_github()
+        success = self.offset_manager.sync_from_github()
+        if success:
+            with self._state_lock:
+                self._version_retry_after.clear()
+            self._rescan_event.set()
+        return success
 
     def _versions_match(self, pm, pid):
         local = get_process_roblox_version(pm.process_handle)
@@ -489,7 +520,7 @@ class HybridInjector:
             current = self.offset_manager.get_current_roblox_version()
         except Exception as e:
             self._log(f"- Could not verify Roblox version: {e}")
-            return False
+            return None
         if not local or not expected or local != current or local != expected:
             self._log(f"[!] Offset version mismatch (Roblox: {local or 'unknown'}, current: {current or 'unknown'}, offsets: {expected or 'unknown'}). Injection blocked.")
             return False
@@ -498,8 +529,11 @@ class HybridInjector:
 
     def _monitor_roblox(self):
         last_pids = set()
-        while True:
+        while not self._watcher_stop_event.is_set():
             try:
+                if self._rescan_event.is_set():
+                    last_pids.clear()
+                    self._rescan_event.clear()
                 current_pids = set(find_roblox_processes())
                 new_pids = current_pids - last_pids
                 lost_pids = last_pids - current_pids
@@ -518,13 +552,20 @@ class HybridInjector:
                     self._is_injecting = False
                 
                 for pid in new_pids:
+                    with self._state_lock:
+                        retry_after = self._version_retry_after.get(pid, 0)
+                    if time.monotonic() < retry_after:
+                        continue
                     try:
                         self._log(f"- New Roblox process detected (PID: {pid})")
                         pm = pymem.Pymem(pid)
                         base = get_module_base(pid)
-                        if base and self._versions_match(pm, pid):
+                        version_check = self._versions_match(pm, pid) if base else False
+                        if version_check is True:
                             self.connected_processes[pid] = {'pm': pm, 'base': base}
-                            self.offset_injector = OffsetInjector(log_cb=self._log)
+                            with self._state_lock:
+                                self._version_retry_after.pop(pid, None)
+                            self.offset_injector = OffsetInjector(log_cb=self._log, offset_manager=self.offset_manager)
                             self.offset_injector.attach_with_handle(pid, pm, base)
                             self.monitor = FFlagMonitor(self.offset_injector, log_cb=self._log)
                             if self.monitoring_enabled:
@@ -532,22 +573,32 @@ class HybridInjector:
                             
                             if self.saved_flags and not self._is_injecting:
                                 self._is_injecting = True
-                                self._log(f"- Reinjecting {len(self.saved_flags)} saved flag(s)...")
-                                result = self._apply_offset(self.saved_flags, silent=True)
-                                if result['success'] > 0:
-                                    self._log(f"- Reinjected {result['success']}/{result['success']+result['fail']} flags")
-                                    _window.evaluate_js(f"window.setFlagCount({result['success']})")
-                                self._is_injecting = False
+                                try:
+                                    self._log(f"- Reinjecting {len(self.saved_flags)} saved flag(s)...")
+                                    result = self._apply_offset(self.saved_flags, silent=True)
+                                    if result['success'] > 0:
+                                        self._log(f"- Reinjected {result['success']}/{result['success']+result['fail']} flags")
+                                        if _window:
+                                            _window.evaluate_js(f"window.setFlagCount({result['success']})")
+                                finally:
+                                    self._is_injecting = False
                         else:
                             try:
                                 pm.close_process()
                             except Exception:
                                 pass
+                            if version_check is None:
+                                with self._state_lock:
+                                    self._version_retry_after[pid] = time.monotonic() + 15
                     except Exception as e:
                         self._log(f"- Failed to attach to PID {pid}: {e}")
                         continue
                 
-                last_pids = current_pids
+                with self._state_lock:
+                    for pid in set(self._version_retry_after) - current_pids:
+                        self._version_retry_after.pop(pid, None)
+                    retrying_pids = set(self._version_retry_after)
+                last_pids = current_pids - retrying_pids
                 
                 if not current_pids and not self._waiting_message_shown:
                     self._log("- Waiting for Roblox...")
@@ -557,9 +608,27 @@ class HybridInjector:
                     
             except Exception as e:
                 pass
-            time.sleep(2)
+            self._watcher_stop_event.wait(2)
+
+    def shutdown(self):
+        self._watcher_stop_event.set()
+        if self._watcher_thread is not threading.current_thread():
+            self._watcher_thread.join(timeout=2.0)
+        if self.monitor:
+            self.monitor.stop_monitoring()
+        for entry in list(self.connected_processes.values()):
+            try:
+                entry['pm'].close_process()
+            except Exception:
+                pass
+        self.connected_processes.clear()
+        self.offset_manager.close()
 
     def uninject_current(self):
+        with self._apply_lock:
+            return self._uninject_current()
+
+    def _uninject_current(self):
         if not self.connected_processes:
             return {'success': 0, 'fail': 0, 'message': 'No Roblox process attached'}
         if self.saved_flags and self.offset_injector:
@@ -572,6 +641,10 @@ class HybridInjector:
         return {'success': 0, 'fail': 0, 'message': 'No flags to uninject'}
 
     def apply_flags(self, flags):
+        with self._apply_lock:
+            return self._apply_flags(flags)
+
+    def _apply_flags(self, flags):
         if not self.connected_processes:
             self.saved_flags = flags
             save_flags_to_file(flags)
@@ -643,8 +716,7 @@ _window = None
 
 def push(msg: str):
     if _window:
-        escaped = msg.replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
-        _window.evaluate_js(f"window.appendLog('{escaped}')")
+        _window.evaluate_js(f"window.appendLog({json.dumps(msg)})")
 
 
 injector = None
@@ -655,9 +727,14 @@ def get_injector():
         injector = HybridInjector(log_cb=push)
     return injector
 
+def shutdown_injector():
+    if injector is not None:
+        injector.shutdown()
+
 
 class Api:
     def close_app(self):
+        shutdown_injector()
         if _window:
             _window.destroy()
         return {'ok': True}
@@ -715,7 +792,6 @@ class Api:
 
     def sync_offsets(self):
         def worker():
-            push("- Syncing offsets from GitHub...")
             success = get_injector().sync_offsets()
             if success:
                 push("- Offsets synced successfully")
@@ -748,6 +824,7 @@ class Api:
         return {'ok': True}
 
     def close_window(self):
+        shutdown_injector()
         if _window:
             _window.destroy()
         return {'ok': True}
@@ -1031,7 +1108,7 @@ html,body{
     </button>
     <button class="btn" id="btn-monitor" onclick="toggleMonitor()">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1.5" y="3.5" width="11" height="7.5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M4.5 11.5v1.5M9.5 11.5v1.5M3.5 13.5h7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-      <span id="monitor-label">Stop Monitor</span>
+      <span id="monitor-label">Start Monitor</span>
     </button>
     <div id="spacer"></div>
     <button class="btn danger" onclick="doUninject()">
@@ -1044,7 +1121,7 @@ html,body{
 <script>
 'use strict';
 
-let monitorOn = true;
+let monitorOn = false;
 
 function ts(){
   const d = new Date();
@@ -1055,10 +1132,9 @@ window.appendLog = function(msg){
   const log = document.getElementById('log');
   const line = document.createElement('div');
   let cls = 'def';
-  if(msg.startsWith('-')) cls='ok';
-  else if(msg.startsWith('-')) cls='err';
-  else if(msg.startsWith('-')) cls='warn';
-  else if(msg.startsWith('-')) cls='info';
+  if(msg.startsWith('[!]')) cls='warn';
+  else if(msg.startsWith('- Failed') || msg.startsWith('- Could not')) cls='err';
+  else if(msg.startsWith('-')) cls='ok';
   line.className = 'log-line ' + cls;
   line.innerHTML = `<span class="ts">${ts()}</span><span class="txt">${escapeHtml(msg)}</span>`;
   log.appendChild(line);
